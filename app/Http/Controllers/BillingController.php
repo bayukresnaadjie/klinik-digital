@@ -4,8 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Billing;
 use App\Models\Kunjungan;
-use Illuminate\Http\Request;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Http\Request;
 
 class BillingController extends Controller
 {
@@ -13,15 +13,24 @@ class BillingController extends Controller
     {
         $query = Billing::with(['kunjungan.pasien', 'kunjungan.dokter']);
 
-        if ($request->filled('status')) $query->where('status', $request->status);
-        if ($request->filled('dari'))   $query->whereDate('created_at', '>=', $request->dari);
-        if ($request->filled('sampai')) $query->whereDate('created_at', '<=', $request->sampai);
+        if ($request->filled('status')) {
+            $query->where('status', $request->status);
+        }
+        if ($request->filled('dari')) {
+            $query->whereDate('created_at', '>=', $request->dari);
+        }
+        if ($request->filled('sampai')) {
+            $query->whereDate('created_at', '<=', $request->sampai);
+        }
 
-        $billing          = $query->orderByDesc('created_at')->paginate(15)->withQueryString();
-        $totalBelumBayar  = Billing::where('status', 'belum_bayar')->sum('total');
-        $totalHariIni     = Billing::whereDate('created_at', today())->where('status', 'lunas')->sum('total');
+        $billing = $query->whereDate('created_at', today())->orderByDesc('created_at')->paginate(15)->withQueryString();
+        $totalHariIni = Billing::whereDate('created_at', today())->where('status', 'lunas')->sum('total');
+        $belumBayar = Kunjungan::where('status', 'selesai')
+            ->whereDoesntHave('billing', fn ($q) => $q->where('status', 'lunas'))
+            ->whereDate('tanggal', today())
+            ->count();
 
-        return view('billing.index', compact('billing', 'totalBelumBayar', 'totalHariIni'));
+        return view('billing.index', compact('billing', 'totalHariIni', 'belumBayar'));
     }
 
     public function create(Kunjungan $kunjungan)
@@ -34,7 +43,7 @@ class BillingController extends Controller
         $kunjungan->load(['pasien', 'dokter', 'resep.details.obat', 'rekamMedis']);
         $biayaObat = 0;
         if ($kunjungan->resep) {
-            $biayaObat = $kunjungan->resep->details->sum(fn($d) => $d->jumlah * $d->obat->harga);
+            $biayaObat = $kunjungan->resep->details->sum(fn ($d) => $d->jumlah * $d->obat->harga);
         }
 
         return view('billing.create', compact('kunjungan', 'biayaObat'));
@@ -44,10 +53,10 @@ class BillingController extends Controller
     {
         $validated = $request->validate([
             'biaya_konsultasi' => 'required|numeric|min:0',
-            'biaya_obat'       => 'required|numeric|min:0',
-            'biaya_tindakan'   => 'nullable|numeric|min:0',
-            'diskon'           => 'nullable|numeric|min:0',
-            'metode_bayar'     => 'required|in:tunai,bpjs,transfer,kartu',
+            'biaya_obat' => 'required|numeric|min:0',
+            'biaya_tindakan' => 'nullable|numeric|min:0',
+            'diskon' => 'nullable|numeric|min:0',
+            'metode_bayar' => 'required|in:tunai,bpjs,transfer,kartu',
         ]);
 
         $total = ($validated['biaya_konsultasi'] + $validated['biaya_obat'] + ($validated['biaya_tindakan'] ?? 0)) - ($validated['diskon'] ?? 0);
@@ -55,22 +64,22 @@ class BillingController extends Controller
         if ($kunjungan->billing) {
             $kunjungan->billing->update([
                 ...$validated,
-                'total'    => $total,
-                'status'   => 'lunas',
+                'total' => $total,
+                'status' => 'lunas',
                 'bayar_at' => now(),
             ]);
             $billing = $kunjungan->billing;
         } else {
             $billing = Billing::create([
-                'kunjungan_id'     => $kunjungan->id,
+                'kunjungan_id' => $kunjungan->id,
                 'biaya_konsultasi' => $validated['biaya_konsultasi'],
-                'biaya_obat'       => $validated['biaya_obat'],
-                'biaya_tindakan'   => $validated['biaya_tindakan'] ?? 0,
-                'diskon'           => $validated['diskon'] ?? 0,
-                'total'            => $total,
-                'metode_bayar'     => $validated['metode_bayar'],
-                'status'           => 'lunas',
-                'bayar_at'         => now(),
+                'biaya_obat' => $validated['biaya_obat'],
+                'biaya_tindakan' => $validated['biaya_tindakan'] ?? 0,
+                'diskon' => $validated['diskon'] ?? 0,
+                'total' => $total,
+                'metode_bayar' => $validated['metode_bayar'],
+                'status' => 'lunas',
+                'bayar_at' => now(),
             ]);
         }
 
@@ -83,13 +92,20 @@ class BillingController extends Controller
     public function show(Billing $billing)
     {
         $billing->load(['kunjungan.pasien', 'kunjungan.dokter', 'kunjungan.poli', 'kunjungan.resep.details.obat']);
+
         return view('billing.show', compact('billing'));
     }
 
     public function kwitansi(Billing $billing)
     {
         $billing->load(['kunjungan.pasien', 'kunjungan.dokter', 'kunjungan.poli', 'kunjungan.resep.details.obat']);
-        $pdf = Pdf::loadView('billing.kwitansi', compact('billing'))->setPaper('a5');
+        $pdf = Pdf::loadView('surat.sakit', ['kunjungan' => $billing->kunjungan])
+            ->setPaper('a4');
+        // Gunakan kwitansi view jika ada, fallback ke billing show
+        if (view()->exists('billing.kwitansi')) {
+            $pdf = Pdf::loadView('billing.kwitansi', compact('billing'))->setPaper('a5');
+        }
+
         return $pdf->stream("kwitansi-{$billing->nomor_billing}.pdf");
     }
 }
